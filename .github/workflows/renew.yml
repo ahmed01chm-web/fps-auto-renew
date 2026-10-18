@@ -1,0 +1,35 @@
+
+name: FPS Auto Renew
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run account check
+        env:
+          FPS_EMAIL: ${{ secrets.FPS_EMAIL }}
+          FPS_PASSWORD: ${{ secrets.FPS_PASSWORD }}
+        run: python renew.py
