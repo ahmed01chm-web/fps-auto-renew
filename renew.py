@@ -1,71 +1,77 @@
+import json
 import os
 from playwright.sync_api import sync_playwright
 
-LOGIN_URL = "https://panel.fps.ms/auth/login"
+PANEL_URL = "https://panel.fps.ms"
 
 
 def run():
-    email = os.environ.get("FPS_EMAIL")
-    password = os.environ.get("FPS_PASSWORD")
+    session_raw = os.environ.get("FPS_SESSION_DATA")
 
-    if not email or not password:
-        print("Error: FPS_EMAIL or FPS_PASSWORD secret is missing in environment.")
+    if not session_raw:
+        print("Error: FPS_SESSION_DATA secret is missing in environment.")
+        return
+
+    try:
+        cookies = json.loads(session_raw)
+    except Exception as e:
+        print(f"Error parsing session JSON: {e}")
         return
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context()
+
+        # حقن الكوكيز في المتصفح
+        try:
+            formatted_cookies = []
+            for c in cookies:
+                domain = c.get("domain", "panel.fps.ms")
+                if domain.startswith("."):
+                    domain = domain[1:]
+                formatted_cookies.append({
+                    "name": c.get("name"),
+                    "value": c.get("value"),
+                    "domain": domain,
+                    "path": c.get("path", "/"),
+                })
+            context.add_cookies(formatted_cookies)
+            print(f"Injected {len(formatted_cookies)} session cookies successfully.")
+        except Exception as e:
+            print(f"Failed to inject cookies: {e}")
+            return
+
+        page = context.new_page()
 
         try:
-            print("Navigating to login page...")
+            print("Navigating directly to panel dashboard...")
             response = page.goto(
-                LOGIN_URL,
+                PANEL_URL,
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(5000)
 
-            print("Initial HTTP status:", response.status if response else "unknown")
-
-            # 1. إغلاق إشعار الكوكيز إن وجد لتفريغ الشاشة
-            accept_btn = page.locator('button:has-text("Accept optional")')
-            if accept_btn.count() > 0 and accept_btn.is_visible():
-                print("Accepting optional cookies...")
-                accept_btn.click()
-                page.wait_for_timeout(1000)
-
-            # 2. تعبئة بيانات الدخول
-            print("Filling credentials...")
-            page.fill('input[name="username"]', email)
-            page.fill('input[name="password"]', password)
-
-            # 3. فحص حالة التحقق من Cloudflare Turnstile
-            page.wait_for_timeout(4000)
-            turnstile_input = page.locator('input[name="cf-turnstile-response"]')
-            token = turnstile_input.get_attribute("value") if turnstile_input.count() > 0 else ""
-            print("Turnstile token generated automatically:", bool(token))
-
-            # 4. الضغط على زر تسجيل الدخول
-            print("Clicking Sign in button...")
-            page.click('button[type="submit"]')
-
-            # 5. انتظار النتيجة وفحص الرابط الناتج
-            page.wait_for_timeout(6000)
+            print("HTTP status:", response.status if response else "unknown")
             current_url = page.url
-            print("URL after login attempt:", current_url)
-            print("Page title after login attempt:", page.title())
+            print("Current URL:", current_url)
+            print("Page title:", page.title())
 
-            # 6. فحص ما إذا كانت هناك رسائل خطأ معروضة بالصفحة
-            alerts = page.locator('[role="alert"], [class*="error"], [class*="alert"]').all_inner_texts()
-            if alerts:
-                clean_alerts = [a.strip() for a in alerts if a.strip()]
-                if clean_alerts:
-                    print("Page alerts/messages:", clean_alerts)
-
-            if "auth/login" not in current_url:
-                print("SUCCESS: Logged in successfully! Reached dashboard/server panel.")
+            if "auth/login" in current_url:
+                print("FAILED: Session expired or rejected. Redirected to login page.")
             else:
-                print("STILL ON LOGIN: Did not redirect. Review token or credentials.")
+                print("SUCCESS: Session valid! Reached server panel dashboard.")
+
+                # البحث عن روابط السيرفرات في اللوحة
+                server_links = page.locator('a[href*="/server/"]')
+                count = server_links.count()
+                print(f"Found {count} server link(s) on dashboard.")
+
+                for i in range(count):
+                    link = server_links.nth(i)
+                    href = link.get_attribute("href")
+                    text = link.inner_text().strip().replace("\n", " ")
+                    print(f"  - Server {i+1}: {text} -> {href}")
 
         finally:
             browser.close()
