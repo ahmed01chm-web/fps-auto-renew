@@ -1,4 +1,3 @@
-
 name: FPS Auto Renew
 
 on:
@@ -23,13 +22,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Playwright
+      - name: Install dependencies
         run: |
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
       - name: Run account check
         env:
-          FPS_EMAIL: ${{ secrets.FPS_EMAIL }}
-          FPS_PASSWORD: ${{ secrets.FPS_PASSWORD }}
+          FPS_SESSION_DATA: ${{ secrets.FPS_SESSION_DATA }}
         run: python renew.py
