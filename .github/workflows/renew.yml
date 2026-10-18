@@ -3,7 +3,8 @@ name: FPS Auto Renew
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *"
+    # يعمل تلقائياً كل 5 ساعات
+    - cron: "0 */5 * * *"
 
 permissions:
   contents: read
