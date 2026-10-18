@@ -1,48 +1,71 @@
 import os
 from playwright.sync_api import sync_playwright
 
-LOGIN_URL = "https://panel.fps.ms"
+LOGIN_URL = "https://panel.fps.ms/auth/login"
 
 
 def run():
+    email = os.environ.get("FPS_EMAIL")
+    password = os.environ.get("FPS_PASSWORD")
+
+    if not email or not password:
+        print("Error: FPS_EMAIL or FPS_PASSWORD secret is missing in environment.")
+        return
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         try:
+            print("Navigating to login page...")
             response = page.goto(
                 LOGIN_URL,
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
+            page.wait_for_timeout(3000)
 
-            # مهلة قصيرة لاكتمال تحميل واجهة جافاسكربت
-            page.wait_for_timeout(5000)
+            print("Initial HTTP status:", response.status if response else "unknown")
 
-            print("HTTP status:", response.status if response else "unknown")
-            print("Page title:", page.title())
-            print("Current URL:", page.url)
+            # 1. إغلاق إشعار الكوكيز إن وجد لتفريغ الشاشة
+            accept_btn = page.locator('button:has-text("Accept optional")')
+            if accept_btn.count() > 0 and accept_btn.is_visible():
+                print("Accepting optional cookies...")
+                accept_btn.click()
+                page.wait_for_timeout(1000)
 
-            # فحص كل حقول الإدخال ومعرفة أسمائها وأنواعها
-            input_count = page.locator("input").count()
-            print(f"Total input fields: {input_count}")
-            for i in range(input_count):
-                inp = page.locator("input").nth(i)
-                inp_type = inp.get_attribute("type") or "text"
-                inp_name = inp.get_attribute("name") or "unnamed"
-                placeholder = inp.get_attribute("placeholder") or ""
-                print(f"  - Input {i+1}: type='{inp_type}', name='{inp_name}', placeholder='{placeholder}'")
+            # 2. تعبئة بيانات الدخول
+            print("Filling credentials...")
+            page.fill('input[name="username"]', email)
+            page.fill('input[name="password"]', password)
 
-            # فحص الأزرار ونصوصها
-            button_count = page.locator("button").count()
-            print(f"Total buttons: {button_count}")
-            for i in range(button_count):
-                btn = page.locator("button").nth(i)
-                btn_type = btn.get_attribute("type") or ""
-                btn_text = btn.inner_text().strip().replace("\n", " ")
-                print(f"  - Button {i+1}: type='{btn_type}', text='{btn_text}'")
+            # 3. فحص حالة التحقق من Cloudflare Turnstile
+            page.wait_for_timeout(4000)
+            turnstile_input = page.locator('input[name="cf-turnstile-response"]')
+            token = turnstile_input.get_attribute("value") if turnstile_input.count() > 0 else ""
+            print("Turnstile token generated automatically:", bool(token))
 
-            print("Page inspection completed.")
+            # 4. الضغط على زر تسجيل الدخول
+            print("Clicking Sign in button...")
+            page.click('button[type="submit"]')
+
+            # 5. انتظار النتيجة وفحص الرابط الناتج
+            page.wait_for_timeout(6000)
+            current_url = page.url
+            print("URL after login attempt:", current_url)
+            print("Page title after login attempt:", page.title())
+
+            # 6. فحص ما إذا كانت هناك رسائل خطأ معروضة بالصفحة
+            alerts = page.locator('[role="alert"], [class*="error"], [class*="alert"]').all_inner_texts()
+            if alerts:
+                clean_alerts = [a.strip() for a in alerts if a.strip()]
+                if clean_alerts:
+                    print("Page alerts/messages:", clean_alerts)
+
+            if "auth/login" not in current_url:
+                print("SUCCESS: Logged in successfully! Reached dashboard/server panel.")
+            else:
+                print("STILL ON LOGIN: Did not redirect. Review token or credentials.")
 
         finally:
             browser.close()
