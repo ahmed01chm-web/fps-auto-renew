@@ -75,7 +75,7 @@ def run():
 
             print(f"Server page title: {page.title()}")
 
-            # فحص النصوص المتعلقة بانتهاء الصلاحية والتجديد
+            # 1. فحص وقراءة نصوص انتهاء الصلاحية
             page_text = page.inner_text("body")
             expiry_lines = [
                 line.strip()
@@ -87,20 +87,13 @@ def run():
                 for line in expiry_lines[:4]:
                     print(f"  - {line}")
 
-            # البحث عن زر التجديد (+ Add XX Hours أو Renew)
+            # 2. فحص والضغط على زر التجديد (+ Add XX Hours أو Renew)
             renew_buttons = page.locator('button:has-text("Add"), button:has-text("Renew"), button:has-text("Hours")')
-            btn_count = renew_buttons.count()
-            print(f"Found {btn_count} candidate renewal button(s).")
-
             renewed = False
-            for i in range(btn_count):
+            for i in range(renew_buttons.count()):
                 btn = renew_buttons.nth(i)
                 btn_text = btn.inner_text().strip().replace("\n", " ")
-                is_disabled = btn.is_disabled()
-                is_visible = btn.is_visible()
-                print(f"  - Button {i+1}: '{btn_text}' (visible={is_visible}, disabled={is_disabled})")
-
-                if is_visible and not is_disabled and any(kw in btn_text.lower() for kw in ["add", "renew"]):
+                if btn.is_visible() and btn.is_enabled() and any(kw in btn_text.lower() for kw in ["add", "renew"]):
                     print(f"Clicking renewal button: '{btn_text}'...")
                     btn.click()
                     page.wait_for_timeout(4000)
@@ -111,6 +104,24 @@ def run():
                 print("SUCCESS: Server renewal executed successfully!")
             else:
                 print("INFO: Renewal button not clickable right now (server time is still above renewal threshold).")
+
+            # 3. فحص والضغط على زر Start إذا كان السيرفر متوقفاً
+            start_buttons = page.locator('button:has-text("Start")')
+            started = False
+            for i in range(start_buttons.count()):
+                btn = start_buttons.nth(i)
+                btn_text = btn.inner_text().strip()
+                # نتحقق أن الزر متاح للضغط ويحمل نص Start حصراً
+                if btn.is_visible() and btn.is_enabled() and btn_text.lower() == "start":
+                    print("Server is stopped. Clicking 'Start' button...")
+                    btn.click()
+                    page.wait_for_timeout(4000)
+                    print("Clicked 'Start' button successfully!")
+                    started = True
+                    break
+
+            if not started:
+                print("INFO: 'Start' button is inactive (server is already running, starting, or queued).")
 
             # التقاط صورة شاشة لحالة السيرفر
             page.screenshot(path="server_status.png", full_page=True)
