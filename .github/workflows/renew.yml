@@ -3,8 +3,8 @@ name: FPS Auto Renew
 on:
   workflow_dispatch:
   schedule:
-    # يعمل تلقائياً كل 5 ساعات
-    - cron: "0 */5 * * *"
+    # يعمل تلقائياً كل رأس ساعة (Hourly)
+    - cron: "0 * * * *"
 
 permissions:
   contents: read
@@ -12,7 +12,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -25,18 +25,21 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install --with-deps chromium
+          playwright install chromium
 
       - name: Run server renew check
         env:
           FPS_SESSION_DATA: ${{ secrets.FPS_SESSION_DATA }}
         run: python renew.py
 
-      - name: Upload server status screenshot
+      - name: Upload server status screenshot & logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: server-status
-          path: server_status.png
+          name: server-run-results
+          path: |
+            server_status.png
+            renew_activity.log
           if-no-files-found: ignore
