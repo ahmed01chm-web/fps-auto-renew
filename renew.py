@@ -35,13 +35,14 @@ def run():
         return
 
     with sync_playwright() as p:
-        logging.info("Launching Chromium instance...")
+        logging.info("Launching Chromium instance with stealth parameters...")
         browser = p.chromium.launch(
             headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
+                "--disable-infobars",
                 "--window-size=1920,1080",
             ],
         )
@@ -51,7 +52,7 @@ def run():
             viewport={"width": 1920, "height": 1080},
         )
 
-        # حقن الكوكيز
+        # 1. حقن الكوكيز الخاصة بالجلسة
         try:
             formatted_cookies = []
             for c in cookies:
@@ -74,18 +75,19 @@ def run():
         page = context.new_page()
 
         try:
-            logging.info(f"Navigating to: {PANEL_URL}")
+            logging.info(f"Navigating to dashboard: {PANEL_URL}")
             page.goto(PANEL_URL, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(4000)
 
+            # التحقق من صلاحية الجلسة
             if "auth/login" in page.url:
-                logging.error("FAILED: Session expired. Re-export cookies.")
+                logging.error("FAILED: Session expired. Update FPS_SESSION_DATA secret.")
                 page.screenshot(path=SCREENSHOT_FILE, full_page=True)
                 return
 
             server_links = page.locator('a[href*="/server/"]')
             if server_links.count() == 0:
-                logging.warning("No servers found on dashboard.")
+                logging.warning("No servers detected on the dashboard.")
                 page.screenshot(path=SCREENSHOT_FILE, full_page=True)
                 return
 
@@ -95,59 +97,76 @@ def run():
                 if first_server_href.startswith("http")
                 else f"https://panel.fps.ms{first_server_href}"
             )
-            logging.info(f"Navigating to server console: {server_full_url}")
+            logging.info(f"Opening target server console: {server_full_url}")
 
             page.goto(server_full_url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(5000)
 
-            # 1. مراقبة الكابتشا وزر التجديد (حتى 5.5 دقيقة)
-            logging.info("Checking renewal requirements and waiting for security check...")
+            # 2. الضغط على زر التجديد أولاً لإطلاق تحدي الكابتشا (Trigger)
             renew_btn = page.locator('button:has-text("Renew Now"), button:has-text("Add")').first
+            if renew_btn.count() > 0 and renew_btn.is_visible():
+                logging.info("Found renewal button. Clicking to trigger verification challenge...")
+                renew_btn.click(force=True)
+                page.wait_for_timeout(4000)
+            else:
+                logging.info("No active renewal button visible at the moment.")
 
-            max_wait_seconds = 330  # 5 دقائق ونصف كحد أقصى
+            # 3. التفاعل مع مربع كابتشا Cloudflare Turnstile إن وُجد
+            try:
+                page.wait_for_selector('iframe[src*="cloudflare"], iframe[src*="turnstile"]', timeout=8000)
+                frame = page.frame_locator('iframe[src*="cloudflare"], iframe[src*="turnstile"]')
+                box = frame.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label')
+                if box.count() > 0 and box.first.is_visible():
+                    logging.info("Clicking Cloudflare Turnstile verification checkbox...")
+                    box.first.click()
+            except Exception:
+                logging.info("No interactive checkbox required; background verification running.")
+
+            # 4. مراقبة الـ DOM كل 15 ثانية (حتى 5.5 دقيقة) للتأكد من التجديد
+            logging.info("Monitoring DOM state for auto-renewal confirmation (up to 5.5 minutes)...")
+            max_wait_seconds = 330
             interval = 15
             elapsed = 0
             renewed = False
 
-            if renew_btn.count() > 0:
-                while elapsed < max_wait_seconds:
-                    if renew_btn.is_visible() and renew_btn.is_enabled():
-                        logging.info(f"Verification complete! Renewal button is active after {elapsed}s. Clicking...")
-                        renew_btn.click(force=True)
-                        page.wait_for_timeout(5000)
-                        renewed = True
-                        break
-                    
-                    logging.info(f"Security verification in progress... ({elapsed}/{max_wait_seconds}s)")
-                    page.wait_for_timeout(interval * 1000)
-                    elapsed += interval
+            while elapsed < max_wait_seconds:
+                page_text = page.inner_text("body").lower()
 
-                if not renewed:
-                    logging.info("Renewal button did not become actionable within timeout (or already renewed).")
-            else:
-                logging.info("No renewal button present on the page.")
+                # فحص الـ DOM: هل اختفت عبارة انتهاء السيرفر أو ظهر عداد وقت إضافي؟
+                is_expired = "free server expired" in page_text or "has expired" in page_text
+                has_timer = any(kw in page_text for kw in ["24h", "23h", "hours left", "expires in", "valid until"])
 
-            # 2. فحص وتشغيل السيرفر (Start) إذا كان مطفأ
+                if not is_expired or has_timer:
+                    logging.info(f"SUCCESS: Server renewed automatically! Detected DOM change after {elapsed}s.")
+                    renewed = True
+                    break
+
+                logging.info(f"Waiting for security token confirmation... ({elapsed}/{max_wait_seconds}s)")
+                page.wait_for_timeout(interval * 1000)
+                elapsed += interval
+
+            if not renewed:
+                logging.warning("Wait duration completed without detecting state change. Check status image.")
+
+            # 5. فحص حالة السيرفر وتشغيله عبر زر (Start) إذا كان متوقفاً
             logging.info("Checking server power state...")
-            page.wait_for_timeout(3000)
-
+            page.wait_for_timeout(2000)
             start_btn = page.locator('button:has-text("Start")').first
             if start_btn.count() > 0 and start_btn.is_visible() and start_btn.is_enabled():
-                btn_text = start_btn.inner_text().strip().lower()
-                if btn_text == "start":
-                    logging.info("Server is offline. Clicking 'Start' button...")
+                if start_btn.inner_text().strip().lower() == "start":
+                    logging.info("Server is currently stopped. Sending 'Start' command...")
                     start_btn.click(force=True)
                     page.wait_for_timeout(5000)
-                    logging.info("Start signal sent successfully.")
+                    logging.info("Start signal dispatched successfully.")
             else:
-                logging.info("Server is already running or start button is unavailable.")
+                logging.info("Server is already running or Start button is not actionable.")
 
-            # حفظ لقطة الشاشة النهائية
+            # حفظ لقطة الشاشة النهائية لحالة اللوحة
             page.screenshot(path=SCREENSHOT_FILE, full_page=True)
-            logging.info("Final screenshot saved to server_status.png.")
+            logging.info("Final dashboard screenshot saved to server_status.png.")
 
         except Exception as e:
-            logging.error(f"Runtime error occurred: {e}", exc_info=True)
+            logging.error(f"Runtime execution error: {e}", exc_info=True)
             page.screenshot(path=SCREENSHOT_FILE, full_page=True)
         finally:
             browser.close()
