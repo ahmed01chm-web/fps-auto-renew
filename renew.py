@@ -2,12 +2,13 @@ import json
 import logging
 import os
 import sys
+import time
 from playwright.sync_api import sync_playwright
 
 PANEL_URL = "https://panel.fps.ms"
 LOG_FILE = "renew_activity.log"
+SCREENSHOT_FILE = "server_status.png"
 
-# إعداد الـ Logging لكتابة المخرجات في الكونسول وملف اللوج معاً
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -34,10 +35,20 @@ def run():
         return
 
     with sync_playwright() as p:
-        logging.info("Launching headless Chromium...")
-        browser = p.chromium.launch(headless=True)
+        logging.info("Launching Chromium instance...")
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--window-size=1920,1080",
+            ],
+        )
+
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
         )
 
         # حقن الكوكيز
@@ -47,18 +58,14 @@ def run():
                 domain = c.get("domain", "panel.fps.ms")
                 if domain.startswith("."):
                     domain = domain[1:]
-                formatted_cookies.append(
-                    {
-                        "name": c.get("name"),
-                        "value": c.get("value"),
-                        "domain": domain,
-                        "path": c.get("path", "/"),
-                    }
-                )
+                formatted_cookies.append({
+                    "name": c.get("name"),
+                    "value": c.get("value"),
+                    "domain": domain,
+                    "path": c.get("path", "/"),
+                })
             context.add_cookies(formatted_cookies)
-            logging.info(
-                f"Injected {len(formatted_cookies)} session cookies successfully."
-            )
+            logging.info(f"Injected {len(formatted_cookies)} cookies successfully.")
         except Exception as e:
             logging.error(f"Failed to inject cookies: {e}")
             browser.close()
@@ -67,27 +74,19 @@ def run():
         page = context.new_page()
 
         try:
-            logging.info(f"Navigating to dashboard: {PANEL_URL}")
+            logging.info(f"Navigating to: {PANEL_URL}")
             page.goto(PANEL_URL, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(4000)
 
-            # التحقق من صلاحية الجلسة
             if "auth/login" in page.url:
-                logging.error(
-                    "FAILED: Session expired / redirected to login. Re-export cookies from your browser."
-                )
-                page.screenshot(path="server_status.png", full_page=True)
+                logging.error("FAILED: Session expired. Re-export cookies.")
+                page.screenshot(path=SCREENSHOT_FILE, full_page=True)
                 return
 
-            # البحث عن السيرفر في اللوحة
             server_links = page.locator('a[href*="/server/"]')
-            server_count = server_links.count()
-
-            if server_count == 0:
-                logging.warning(
-                    "No server cards found on the dashboard. Capturing view..."
-                )
-                page.screenshot(path="server_status.png", full_page=True)
+            if server_links.count() == 0:
+                logging.warning("No servers found on dashboard.")
+                page.screenshot(path=SCREENSHOT_FILE, full_page=True)
                 return
 
             first_server_href = server_links.first.get_attribute("href")
@@ -96,83 +95,61 @@ def run():
                 if first_server_href.startswith("http")
                 else f"https://panel.fps.ms{first_server_href}"
             )
-            logging.info(f"Opening target server: {server_full_url}")
+            logging.info(f"Navigating to server console: {server_full_url}")
 
             page.goto(server_full_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(6000)
+            page.wait_for_timeout(5000)
 
-            logging.info(f"Page reached. Title: '{page.title()}'")
+            # 1. مراقبة الكابتشا وزر التجديد (حتى 5.5 دقيقة)
+            logging.info("Checking renewal requirements and waiting for security check...")
+            renew_btn = page.locator('button:has-text("Renew Now"), button:has-text("Add")').first
 
-            # 1. فحص التوقيت المتبقي
-            page_text = page.inner_text("body")
-            expiry_lines = [
-                line.strip()
-                for line in page_text.split("\n")
-                if any(
-                    kw in line.lower()
-                    for kw in ["expir", "renew", "hour", "time left"]
-                )
-            ]
-            if expiry_lines:
-                logging.info("Detected server status indicators:")
-                for line in expiry_lines[:4]:
-                    logging.info(f"  -> {line}")
-
-            # 2. فحص والضغط على زر التجديد
-            renew_buttons = page.locator(
-                'button:has-text("Add"), button:has-text("Renew"), button:has-text("Hours")'
-            )
+            max_wait_seconds = 330  # 5 دقائق ونصف كحد أقصى
+            interval = 15
+            elapsed = 0
             renewed = False
-            for i in range(renew_buttons.count()):
-                btn = renew_buttons.nth(i)
-                btn_text = btn.inner_text().strip().replace("\n", " ")
-                if btn.is_visible() and btn.is_enabled() and any(
-                    kw in btn_text.lower() for kw in ["add", "renew"]
-                ):
-                    logging.info(f"Found active renewal button: '{btn_text}'. Clicking...")
-                    btn.click()
-                    page.wait_for_timeout(4000)
-                    renewed = True
-                    break
 
-            if renewed:
-                logging.info("SUCCESS: Server renewal clicked and confirmed!")
+            if renew_btn.count() > 0:
+                while elapsed < max_wait_seconds:
+                    if renew_btn.is_visible() and renew_btn.is_enabled():
+                        logging.info(f"Verification complete! Renewal button is active after {elapsed}s. Clicking...")
+                        renew_btn.click(force=True)
+                        page.wait_for_timeout(5000)
+                        renewed = True
+                        break
+                    
+                    logging.info(f"Security verification in progress... ({elapsed}/{max_wait_seconds}s)")
+                    page.wait_for_timeout(interval * 1000)
+                    elapsed += interval
+
+                if not renewed:
+                    logging.info("Renewal button did not become actionable within timeout (or already renewed).")
             else:
-                logging.info(
-                    "INFO: Renewal button is not actionable yet (time is still high)."
-                )
+                logging.info("No renewal button present on the page.")
 
-            # 3. فحص والضغط على زر Start إن كان متوقفاً
-            start_buttons = page.locator('button:has-text("Start")')
-            started = False
-            for i in range(start_buttons.count()):
-                btn = start_buttons.nth(i)
-                btn_text = btn.inner_text().strip()
-                if (
-                    btn.is_visible()
-                    and btn.is_enabled()
-                    and btn_text.lower() == "start"
-                ):
-                    logging.info("Server is offline. Pressing 'Start'...")
-                    btn.click()
-                    page.wait_for_timeout(4000)
-                    started = True
-                    break
+            # 2. فحص وتشغيل السيرفر (Start) إذا كان مطفأ
+            logging.info("Checking server power state...")
+            page.wait_for_timeout(3000)
 
-            if started:
-                logging.info("SUCCESS: 'Start' trigger sent successfully.")
+            start_btn = page.locator('button:has-text("Start")').first
+            if start_btn.count() > 0 and start_btn.is_visible() and start_btn.is_enabled():
+                btn_text = start_btn.inner_text().strip().lower()
+                if btn_text == "start":
+                    logging.info("Server is offline. Clicking 'Start' button...")
+                    start_btn.click(force=True)
+                    page.wait_for_timeout(5000)
+                    logging.info("Start signal sent successfully.")
             else:
-                logging.info("INFO: Server is already running or start is disabled.")
+                logging.info("Server is already running or start button is unavailable.")
 
-            # حفظ لقطة الشاشة
-            page.screenshot(path="server_status.png", full_page=True)
-            logging.info("Status screenshot saved to 'server_status.png'.")
+            # حفظ لقطة الشاشة النهائية
+            page.screenshot(path=SCREENSHOT_FILE, full_page=True)
+            logging.info("Final screenshot saved to server_status.png.")
 
         except Exception as e:
-            logging.error(f"Execution runtime error: {e}", exc_info=True)
-            page.screenshot(path="server_status.png", full_page=True)
+            logging.error(f"Runtime error occurred: {e}", exc_info=True)
+            page.screenshot(path=SCREENSHOT_FILE, full_page=True)
         finally:
-            logging.info("Closing browser context.")
             browser.close()
 
     logging.info("=== Finished Execution Successfully ===")
